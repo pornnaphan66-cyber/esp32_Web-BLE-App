@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>ESP32 Web BLE App</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta charset="UTF-8">
+
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            background: #f2f2f2;
+        }
+        .topnav {
+            background: #0a6cff;
+            color: white;
+            padding: 12px;
+            text-align: center;
+        }
+        .content {
+            padding: 20px;
+        }
+        .card {
+            background: white;
+            padding: 20px;
+            margin-bottom: 20px;
+            border-radius: 10px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.2);
+        }
+        button {
+            padding: 10px 15px;
+            margin: 5px;
+            font-size: 16px;
+            cursor: pointer;
+        }
+        .gray-label {
+            color: gray;
+            font-size: 14px;
+        }
+    </style>
+</head>
+
+<body>
+
+<div class="topnav">
+    <h1>ESP32 Web BLE Application</h1>
+</div>
+
+<div class="content">
+
+    <!-- BLE CONTROL -->
+    <div class="card">
+        <button id="connectBleButton">Connect BLE</button>
+        <button id="disconnectBleButton">Disconnect</button>
+        <p class="gray-label">
+            BLE State:
+            <strong><span id="bleState" style="color:red;">Disconnected</span></strong>
+        </p>
+    </div>
+
+    <!-- SENSOR DATA -->
+    <div class="card">
+        <h2>Sensor Data</h2>
+        <p>Heart Rate: <strong><span id="hr">--</span> bpm</strong></p>
+        <p>SpO2: <strong><span id="spo2">--</span> %</strong></p>
+        <p>Temperature: <strong><span id="tempC">--</span> °C</strong></p>
+        <p class="gray-label">Last Update: <span id="timestamp">-</span></p>
+
+        <button id="saveButton">Save</button>
+        <button id="downloadButton">Download CSV</button>
+    </div>
+
+    <!-- GPIO CONTROL -->
+    <div class="card">
+        <h2>Control GPIO 2</h2>
+        <button id="onButton">ON</button>
+        <button id="offButton">OFF</button>
+        <p class="gray-label">Last value sent: <span id="valueSent">-</span></p>
+    </div>
+
+</div>
+
+<script>
+/* ================= DOM ================= */
+const connectButton = document.getElementById("connectBleButton");
+const disconnectButton = document.getElementById("disconnectBleButton");
+const onButton = document.getElementById("onButton");
+const offButton = document.getElementById("offButton");
+
+const hrContainer = document.getElementById("hr");
+const spo2Container = document.getElementById("spo2");
+const tempCContainer = document.getElementById("tempC");
+const timestampContainer = document.getElementById("timestamp");
+const bleStateContainer = document.getElementById("bleState");
+const latestValueSent = document.getElementById("valueSent");
+
+const saveButton = document.getElementById("saveButton");
+const downloadButton = document.getElementById("downloadButton");
+
+/* ================= DATA ================= */
+// เก็บอัตโนมัติทุกครั้งที่ BLE ส่ง
+let autoData = [];
+
+// เก็บเฉพาะที่กด Save (เตรียมส่ง Google Sheet)
+let savedForSheet = [];
+
+/* ================= BLE UUID ================= */
+const deviceName = "ESP32_PIM";
+const bleService = "19b10000-e8f2-537e-4f6c-d104768a1214";
+const ledCharacteristic = "19b10001-e8f2-537e-4f6c-d104768a1214";
+const sensorCharacteristic = "19b10002-e8f2-537e-4f6c-d104768a1214";
+
+let bleServer;
+let bleServiceFound;
+
+/* ================= BLE BUTTONS ================= */
+connectButton.onclick = connectToDevice;
+disconnectButton.onclick = disconnectDevice;
+onButton.onclick = () => writeOnCharacteristic(1);
+offButton.onclick = () => writeOnCharacteristic(0);
+
+/* ================= BLE FUNCTIONS ================= */
+function connectToDevice() {
+    navigator.bluetooth.requestDevice({
+        filters: [{ name: deviceName }],
+        optionalServices: [bleService]
+    })
+    .then(device => {
+        bleStateContainer.innerHTML = "Connected";
+        bleStateContainer.style.color = "green";
+        device.addEventListener("gattservicedisconnected", onDisconnected);
+        return device.gatt.connect();
+    })
+    .then(server => {
+        bleServer = server;
+        return server.getPrimaryService(bleService);
+    })
+    .then(service => {
+        bleServiceFound = service;
+        return service.getCharacteristic(sensorCharacteristic);
+    })
+    .then(characteristic => {
+        characteristic.addEventListener("characteristicvaluechanged", handleCharacteristicChange);
+        characteristic.startNotifications();
+    })
+    .catch(err => console.error(err));
+}
+
+function onDisconnected() {
+    bleStateContainer.innerHTML = "Disconnected";
+    bleStateContainer.style.color = "red";
+}
+
+function handleCharacteristicChange(event) {
+    const data = new TextDecoder().decode(event.target.value);
+    const values = data.split(",");
+
+    if (values.length >= 3) {
+        const time = getDateTime();
+
+        hrContainer.innerHTML = values[0];
+        spo2Container.innerHTML = values[1];
+        tempCContainer.innerHTML = values[2];
+        timestampContainer.innerHTML = time;
+
+        autoData.push({
+            time: time,
+            hr: values[0],
+            spo2: values[1],
+            temp: values[2]
+        });
+    }
+}
+
+function writeOnCharacteristic(value) {
+    if (!bleServer || !bleServer.connected) return;
+
+    bleServiceFound
+        .getCharacteristic(ledCharacteristic)
+        .then(char => char.writeValue(new Uint8Array([value])))
+        .then(() => latestValueSent.innerHTML = value);
+}
+
+function disconnectDevice() {
+    if (bleServer && bleServer.connected) bleServer.disconnect();
+}
+
+/* ================= SAVE (GOOGLE SHEET READY) ================= */
+saveButton.onclick = () => {
+    if (autoData.length === 0) {
+        alert("No data to save");
+        return;
+    }
+
+    // ตัวอย่าง: เซฟเฉพาะค่าล่าสุด
+    const last = autoData[autoData.length - 1];
+    savedForSheet.push(last);
+
+    console.log("Prepared for Google Sheet:", last);
+    alert("Saved (ready for Google Sheet)");
+};
+
+/* ================= DOWNLOAD CSV ================= */
+downloadButton.onclick = () => {
+    if (autoData.length === 0) {
+        alert("No data to download");
+        return;
+    }
+
+    let csv = "Time,HeartRate,SpO2,TempC\n";
+    autoData.forEach(r => {
+        csv += `${r.time},${r.hr},${r.spo2},${r.temp}\n`;
+    });
+
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "sensor_data.csv";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+};
+
+/* ================= TIME ================= */
+function getDateTime() {
+    return new Date().toLocaleString();
+}
+</script>
+
+</body>
+</html>
